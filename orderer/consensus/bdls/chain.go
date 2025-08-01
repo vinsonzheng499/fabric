@@ -10,10 +10,10 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -29,7 +29,6 @@ import (
 
 	types2 "github.com/hyperledger/fabric/orderer/common/types"
 
-	//"google.golang.org/protobuf/proto"
 	"github.com/golang/protobuf/proto"
 	//"github.com/hyperledger/fabric-protos-go/msp"
 	//"github.com/hyperledger/fabric-protos-go/orderer/etcdraft"
@@ -37,12 +36,14 @@ import (
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
+	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	"github.com/hyperledger/fabric/orderer/consensus"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
 	"github.com/BDLS-bft/bdls/crypto/btcec"
+	"github.com/hyperledger/fabric-protos-go/msp"
 	agent "github.com/hyperledger/fabric/orderer/consensus/bdls/agent-tcp"
 )
 
@@ -160,6 +161,7 @@ type Chain struct {
 	totalLatency time.Duration
 
 	clock clock.Clock // Tests can inject a fake clock
+	conf  *localconfig.TopLevel
 }
 
 type Options struct {
@@ -256,7 +258,7 @@ func NewChain(
 	metrics *Metrics,
 	bccsp bccsp.BCCSP,
 	opts Options,
-
+	conf *localconfig.TopLevel,
 ) (*Chain, error) {
 	/*requestInspector := &RequestInspector{
 		ValidateIdentityStructure: func(_ *msp.SerializedIdentity) error {
@@ -307,6 +309,7 @@ func NewChain(
 			ConfigProposalsReceived: metrics.ConfigProposalsReceived.With("channel", support.ChannelID()),
 		},
 		bccsp: bccsp,
+		conf:  conf,
 
 		chConsensusMessages: make(chan struct{}, 1),
 	}
@@ -337,36 +340,59 @@ func NewChain(
 		StateCompare:  func(a bdls.State, b bdls.State) int { return bytes.Compare(a, b) },
 		StateValidate: func(bdls.State) bool { return true },
 	}
-	/*config := new(bdls.Config)
-	config.Epoch = time.Now()
-	config.CurrentHeight = 0 // c.support.Height()
-	config.StateCompare = func(a bdls.State, b bdls.State) int { return bytes.Compare(a, b) }
-	config.StateValidate = func(bdls.State) bool { return true }
-	*/
-	Keys := make([]string, 0)
-	Keys = append(Keys,
-		"68082493172628484253808951113461196766221768923883438540199548009461479956986",
-		"44652770827640294682875208048383575561358062645764968117337703282091165609211",
-		"80512969964988849039583604411558290822829809041684390237207179810031917243659",
-		"55978351916851767744151875911101025920456547576858680756045508192261620541580")
-	for k := range Keys { //c.opts.Consenters {
-		//for k := range c.opts.Consenters {
-		i := new(big.Int)
-		_, err := fmt.Sscan(Keys[k], i)
-		if err != nil {
-			c.Logger.Warnf("error scanning value:", err)
-		}
-		priv := new(ecdsa.PrivateKey)
-		priv.PublicKey.Curve = bdls.S256Curve
-		priv.D = i
-		priv.PublicKey.X, priv.PublicKey.Y = bdls.S256Curve.ScalarBaseMult(priv.D.Bytes())
-		// myself
-		if int(c.bdlsId) == k+1 {
-			config.PrivateKey = priv
-		}
 
-		// set validator sequence
-		config.Participants = append(config.Participants, bdls.DefaultPubKeyToIdentity(&priv.PublicKey))
+	serializedID, err := signerSerializer.Serialize()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to serialize signer")
+	}
+	sID := &msp.SerializedIdentity{}
+	if err := proto.Unmarshal(serializedID, sID); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal serialized identity")
+	}
+
+	// Parse the certificate from the serialized identity
+	cert, err := x509.ParseCertificate(sID.IdBytes)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse certificate from serialized identity")
+	}
+	
+	// Generate SKI from the certificate's public key
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to marshal public key")
+	}
+	
+	// Create a simple hash-based SKI (Subject Key Identifier)
+	skiHash := sha256.Sum256(pubKeyBytes)
+	ski := skiHash[:]
+
+	privKey, err := c.bccsp.GetKey(ski)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get private key")
+	}
+
+	privKeyBytes, err := privKey.Bytes()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get private key bytes")
+	}
+
+	priv, err := x509.ParseECPrivateKey(privKeyBytes)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse ECDSA private key")
+	}
+	config.PrivateKey = priv
+
+	for _, consenter := range c.opts.Consenters {
+		// consenter.Identity contains the raw certificate bytes
+		cert, err := x509.ParseCertificate(consenter.Identity)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to parse consenter certificate")
+		}
+		pubKey, ok := cert.PublicKey.(*ecdsa.PublicKey)
+		if !ok {
+			return nil, errors.Errorf("consenter public key is not ECDSA")
+		}
+		config.Participants = append(config.Participants, bdls.DefaultPubKeyToIdentity(pubKey))
 	}
 
 	c.config = config
@@ -623,7 +649,14 @@ func (c *Chain) startConsensus(config *bdls.Config) error {
 	}
 	consensus.SetLatency(200 * time.Millisecond)
 	// load endpoints
-	peers := []string{"localhost:4680", "localhost:4681", "localhost:4682", "localhost:4683"}
+	var peers []string
+	for _, consenter := range c.opts.Consenters {
+		if consenter.Id != uint32(c.bdlsId) {
+			// NOTE: This is still not ideal. The port should be configurable.
+			// For now, we use the same logic as the listener.
+			peers = append(peers, fmt.Sprintf("%s:%d", consenter.Host, 4679+consenter.Id))
+		}
+	}
 
 	// start listener
 	tcpaddr, err := net.ResolveTCPAddr("tcp", fmt.Sprint(":", 4679+int(c.bdlsId)))

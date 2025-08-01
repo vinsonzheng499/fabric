@@ -122,6 +122,7 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 		c.Metrics,
 		c.BCCSP,
 		opts,
+		c.Conf,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed creating a new Chain")
