@@ -26,6 +26,7 @@ const (
 	// EtcdRaft The type key for etcd based RAFT consensus.
 	EtcdRaft = "etcdraft"
 	BFT      = "BFT"
+	BDLS     = "bdls"
 )
 
 var logger = flogging.MustGetLogger("common.tools.configtxgen.localconfig")
@@ -156,10 +157,27 @@ type Orderer struct {
 	ConsenterMapping []*Consenter             `yaml:"ConsenterMapping"`
 	EtcdRaft         *etcdraft.ConfigMetadata `yaml:"EtcdRaft"`
 	SmartBFT         *smartbft.Options        `yaml:"SmartBFT"`
+	BDLS             *BDLSOptions             `yaml:"BDLS"`
 	Organizations    []*Organization          `yaml:"Organizations"`
 	MaxChannels      uint64                   `yaml:"MaxChannels"`
 	Capabilities     map[string]bool          `yaml:"Capabilities"`
 	Policies         map[string]*Policy       `yaml:"Policies"`
+}
+
+// BDLSOptions contains BDLS-specific configuration options
+type BDLSOptions struct {
+	NetworkTimeout     string `yaml:"NetworkTimeout"`
+	ConsensusTimeout   string `yaml:"ConsensusTimeout"`
+	MaxMessageSize     uint32 `yaml:"MaxMessageSize"`
+	BatchSize          uint32 `yaml:"BatchSize"`
+	HeartbeatInterval  string `yaml:"HeartbeatInterval"`
+	MaxRetries         uint32 `yaml:"MaxRetries"`
+	BufferSize         uint32 `yaml:"BufferSize"`
+	ViewChangeTimeout  string `yaml:"ViewChangeTimeout"`
+	EnableMetrics      bool   `yaml:"EnableMetrics"`
+	LogLevel          string `yaml:"LogLevel"`
+	ResilienceMode    string `yaml:"ResilienceMode"`
+	SyncOnStart       bool   `yaml:"SyncOnStart"`
 }
 
 // BatchSize contains configuration affecting the size of batches.
@@ -213,6 +231,20 @@ var genesisDefaults = TopLevel{
 			CollectTimeout:            types.DefaultConfig.CollectTimeout.String(),
 			SyncOnStart:               types.DefaultConfig.SyncOnStart,
 			SpeedUpViewChange:         types.DefaultConfig.SpeedUpViewChange,
+		},
+		BDLS: &BDLSOptions{
+			NetworkTimeout:     "5s",
+			ConsensusTimeout:   "30s",
+			MaxMessageSize:     10485760, // 10MB
+			BatchSize:          100,
+			HeartbeatInterval:  "3s",
+			MaxRetries:         3,
+			BufferSize:         1000,
+			ViewChangeTimeout:  "20s",
+			EnableMetrics:      true,
+			LogLevel:          "info",
+			ResilienceMode:    "normal",
+			SyncOnStart:       false,
 		},
 	},
 }
@@ -447,6 +479,36 @@ loop:
 			}
 			if len(c.Identity) == 0 {
 				logger.Panicf("consenter info in %s configuration did not specify identity certificate", BFT)
+			}
+
+			cf.TranslatePathInPlace(configDir, &c.ClientTLSCert)
+			cf.TranslatePathInPlace(configDir, &c.ServerTLSCert)
+			cf.TranslatePathInPlace(configDir, &c.Identity)
+		}
+	case BDLS:
+		// BDLS consensus configuration validation
+		if len(ord.ConsenterMapping) == 0 {
+			logger.Panicf("%s configuration did not specify any consenter", BDLS)
+		}
+
+		for _, c := range ord.ConsenterMapping {
+			if c.Host == "" {
+				logger.Panicf("consenter info in %s configuration did not specify host", BDLS)
+			}
+			if c.Port == 0 {
+				logger.Panicf("consenter info in %s configuration did not specify port", BDLS)
+			}
+			if c.ClientTLSCert == "" {
+				logger.Panicf("consenter info in %s configuration did not specify client TLS cert", BDLS)
+			}
+			if c.ServerTLSCert == "" {
+				logger.Panicf("consenter info in %s configuration did not specify server TLS cert", BDLS)
+			}
+			if len(c.MSPID) == 0 {
+				logger.Panicf("consenter info in %s configuration did not specify MSP ID", BDLS)
+			}
+			if len(c.Identity) == 0 {
+				logger.Panicf("consenter info in %s configuration did not specify identity certificate", BDLS)
 			}
 
 			cf.TranslatePathInPlace(configDir, &c.ClientTLSCert)

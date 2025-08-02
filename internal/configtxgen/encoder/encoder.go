@@ -12,6 +12,7 @@ import (
 
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 	cb "github.com/hyperledger/fabric-protos-go-apiv2/common"
+
 	"github.com/hyperledger/fabric-protos-go-apiv2/orderer/smartbft"
 	pb "github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric/common/channelconfig"
@@ -44,6 +45,8 @@ const (
 	ConsensusTypeEtcdRaft = "etcdraft"
 	// ConsensusTypeBFT identifies the BFT-based consensus implementation.
 	ConsensusTypeBFT = "BFT"
+	// ConsensusTypeBDLS identifies the BDLS-based consensus implementation.
+	ConsensusTypeBDLS = "bdls"
 
 	// BlockValidationPolicyKey TODO
 	BlockValidationPolicyKey = "BlockValidation"
@@ -226,6 +229,16 @@ func NewOrdererGroup(conf *genesisconfig.Orderer, channelCapabilities map[string
 		}
 		// Force leader rotation to be turned off
 		conf.SmartBFT.LeaderRotation = smartbft.Options_ROTATION_OFF
+		// Overwrite policy manually by computing it from the consenters
+		policies.EncodeBFTBlockVerificationPolicy(consenterProtos, ordererGroup)
+	case ConsensusTypeBDLS:
+		consenterProtos, err := consenterProtosFromConfig(conf.ConsenterMapping)
+		if err != nil {
+			return nil, errors.Errorf("cannot load consenter config for orderer type %s: %s", ConsensusTypeBDLS, err)
+		}
+		addValue(ordererGroup, channelconfig.OrderersValue(consenterProtos), channelconfig.AdminsPolicyKey)
+		// BDLS uses similar consenter management as BFT but without SmartBFT-specific options
+		// For now, BDLS doesn't use protobuf metadata - configuration is handled via YAML
 		// Overwrite policy manually by computing it from the consenters
 		policies.EncodeBFTBlockVerificationPolicy(consenterProtos, ordererGroup)
 	default:

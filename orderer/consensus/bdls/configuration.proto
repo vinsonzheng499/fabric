@@ -1,0 +1,49 @@
+// Copyright the Hyperledger Fabric contributors. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+option go_package = "github.com/hyperledger/fabric/orderer/consensus/bdls";
+option java_package = "org.hyperledger.fabric.protos.orderer.bdls";
+
+package orderer.bdls;
+
+// BDLSOptions provides BDLS-specific configuration options for the ordering service
+message BDLSOptions {
+    // NetworkTimeout is the timeout for network operations in BDLS consensus
+    string network_timeout = 1;
+    
+    // ConsensusTimeout is the maximum time to wait for consensus completion
+    string consensus_timeout = 2;
+    
+    // MaxMessageSize is the maximum size of a consensus message in bytes
+    uint32 max_message_size = 3;
+    
+    // BatchSize is the number of transactions to batch together before consensus
+    uint32 batch_size = 4;
+    
+    // HeartbeatInterval is the interval between heartbeat messages
+    string heartbeat_interval = 5;
+    
+    // MaxRetries is the maximum number of retries for failed operations
+    uint32 max_retries = 6;
+    
+    // BufferSize is the size of the message buffer for incoming/outgoing messages
+    uint32 buffer_size = 7;
+    
+    // ViewChangeTimeout is the timeout for view change operations
+    string view_change_timeout = 8;
+    
+    // EnableMetrics indicates whether to enable BDLS-specific metrics collection
+    bool enable_metrics = 9;
+    
+    // LogLevel sets the logging level for BDLS consensus (debug, info, warn, error)
+    string log_level = 10;
+    
+    // ResilienceMode configures the resilience strategy (normal, aggressive, conservative)
+    string resilience_mode = 11;
+    
+    // SyncOnStart indicates whether to sync with the network on startup
+    bool sync_on_start = 12;
+} 

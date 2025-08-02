@@ -42,6 +42,7 @@ import (
 	"github.com/hyperledger/fabric/orderer/common/metadata"
 	"github.com/hyperledger/fabric/orderer/common/multichannel"
 	"github.com/hyperledger/fabric/orderer/consensus"
+	"github.com/hyperledger/fabric/orderer/consensus/bdls"
 	"github.com/hyperledger/fabric/orderer/consensus/etcdraft"
 	"github.com/hyperledger/fabric/orderer/consensus/smartbft"
 	"github.com/hyperledger/fabric/protoutil"
@@ -62,11 +63,13 @@ var (
 	clusterTypes = map[string]struct{}{
 		"etcdraft": {},
 		"BFT":      {},
+		"bdls":     {},
 	}
 )
 
 // Main is the entry point of orderer process
 func Main() {
+	logger.Info("Vinson here")
 	fullCmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	// "version" command
@@ -634,6 +637,7 @@ func initializeMultichannelRegistrar(
 	etcdraftConsenter, clusterMetrics := etcdraft.New(clusterDialer, conf, srvConf, srv, registrar, metricsProvider, bccsp)
 	consenters["etcdraft"] = etcdraftConsenter
 	consenters["BFT"] = smartbft.New(dpmr.Registry(), signer, clusterDialer, conf, srvConf, srv, registrar, metricsProvider, clusterMetrics, bccsp)
+	consenters["bdls"] = bdls.New(signer, clusterDialer, conf, srvConf, srv, registrar, metricsProvider, clusterMetrics, bccsp)
 
 	registrar.Initialize(consenters)
 	return registrar

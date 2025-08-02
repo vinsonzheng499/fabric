@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package orderer.bdls;
+
+option go_package = "github.com/hyperledger/fabric-protos-go-apiv2/orderer/bdls";
+
+// BDLSOptions contains BDLS-specific configuration options
+message BDLSOptions {
+    // Network timeout for message delivery
+    string network_timeout = 1;
+    
+    // Consensus timeout for reaching agreement
+    string consensus_timeout = 2;
+    
+    // Maximum message size in bytes
+    uint32 max_message_size = 3;
+    
+    // Batch size for request processing
+    uint32 batch_size = 4;
+    
+    // Heartbeat interval for liveness
+    string heartbeat_interval = 5;
+    
+    // Maximum number of retries for failed operations
+    uint32 max_retries = 6;
+    
+    // Buffer size for message processing
+    uint32 buffer_size = 7;
+    
+    // View change timeout
+    string view_change_timeout = 8;
+    
+    // Enable metrics collection
+    bool enable_metrics = 9;
+    
+    // Log level for BDLS consensus
+    string log_level = 10;
+    
+    // Resilience mode (normal, aggressive, conservative)
+    string resilience_mode = 11;
+    
+    // Sync on start flag
+    bool sync_on_start = 12;
+} 
