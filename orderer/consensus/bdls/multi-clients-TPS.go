@@ -42,7 +42,7 @@ func (c *Chain) TestMultiClients() {
 
 func (c *Chain) TestOrderClient1(wg *sync.WaitGroup) {
 	c.Logger.Infof("For client %v", 1)
-	for i := 0; i < 100000; i++ {
+	for i := 0; i < 1000; i++ {
 		env := &common.Envelope{
 			Payload: protoutil.MarshalOrPanic(&common.Payload{
 				Header: &common.Header{ChannelHeader: protoutil.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_MESSAGE), ChannelId: c.Channel})},

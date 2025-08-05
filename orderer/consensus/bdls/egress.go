@@ -42,12 +42,11 @@ type Egress struct {
 
 // Nodes returns nodes from the runtime config
 func (e *Egress) Nodes() []uint64 {
-	nodes := e.RuntimeConfig.Load().(RuntimeConfig).Nodes
-	var res []uint64
-	for _, n := range nodes {
-		res = append(res, (uint64)(n))
+	if e.RuntimeConfig == nil {
+		return []uint64{}
 	}
-	return res
+	nodes := e.RuntimeConfig.Load().(RuntimeConfig).Nodes
+	return nodes
 }
 
 // SendConsensus sends the BFT message to the cluster
@@ -66,7 +65,6 @@ func (e *Egress) SendTransaction(targetID uint64, request []byte) {
 		e.Logger.Panicf("Failed unmarshaling request %v to envelope: %v", request, err)
 	}
 	msg := &ab.SubmitRequest{
-		Channel: e.Channel,
 		Payload: env,
 	}
 
@@ -81,6 +79,5 @@ func (e *Egress) SendTransaction(targetID uint64, request []byte) {
 func bftMsgToClusterMsg(message *bdls.Message, channel string) *ab.ConsensusRequest {
 	return &ab.ConsensusRequest{
 		Payload: protoutil.MarshalOrPanic(message),
-		Channel: channel,
 	}
 }

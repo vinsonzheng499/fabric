@@ -14,7 +14,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,7 +42,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/BDLS-bft/bdls/crypto/btcec"
-	agent "github.com/hyperledger/fabric/orderer/consensus/bdls/agent-tcp"
 )
 
 // ConfigValidator interface
@@ -108,7 +106,7 @@ type Chain struct {
 	haltC   chan struct{} // Signals to goroutines that the chain is halting
 	doneC   chan struct{} // Closes when the chain halts
 	startC  chan struct{} // Closes when the node is started
-	readyC  chan Ready
+	readyC  chan Ready 
 
 	errorCLock   sync.RWMutex
 	errorC       chan struct{} // returned by Errored()
@@ -148,7 +146,8 @@ type Chain struct {
 
 	configInflight bool // this is true when there is config block or ConfChange in flight
 	blockInflight  int  // number of in flight blocks
-	transportLayer *agent.TCPAgent
+
+	egress *Egress
 
 	latency      time.Duration
 	die          chan struct{}
@@ -311,24 +310,37 @@ func NewChain(
 		chConsensusMessages: make(chan struct{}, 1),
 	}
 
+	rpc := &cluster.RPC{
+		Channel:       c.Channel,
+		Comm:          c.Comm,
+		StreamsByType: cluster.NewStreamsByType(),
+		Logger:        c.Logger,
+		Timeout:       5 * time.Second,
+	}
+
+	c.egress = &Egress{
+		Channel:       c.Channel,
+		Logger:        c.Logger,
+		RPC:           rpc,
+		RuntimeConfig: &atomic.Value{},
+	}
+
+	// Initialize RuntimeConfig
+	runtimeConfig := RuntimeConfig{
+		Nodes:           make([]uint64, len(c.opts.Consenters)),
+		LastBlock:       c.lastBlock,
+		LastConfigBlock: c.lastBlock,
+	}
+	for i := range c.opts.Consenters {
+		runtimeConfig.Nodes[i] = uint64(i + 1) // BDLS node IDs are 1-based
+	}
+	c.egress.RuntimeConfig.Store(runtimeConfig)
+
 	// Sets initial values for metrics
 	c.Metrics.ClusterSize.Set(float64(len(c.opts.Consenters)))
 	c.Metrics.IsLeader.Set(float64(0)) // all nodes start out as followers
 	c.Metrics.ActiveNodes.Set(float64(0))
 	c.Metrics.CommittedBlockNumber.Set(float64(c.lastBlock.Header.Number))
-
-	/*
-		lastBlock := LastBlockFromLedgerOrPanic(support, c.Logger)
-		lastConfigBlock := LastConfigBlockFromLedgerOrPanic(support, c.Logger)
-
-	*/
-
-	// Setup communication with list of remotes notes for the new channel
-
-	/*privateKey, err := ecdsa.GenerateKey(S256Curve, rand.Reader)
-	if err != nil {
-		c.Logger.Warnf("error generating privateKey value:", err)
-	}*/
 
 	// setup consensus config at the given height
 	config := &bdls.Config{
@@ -336,21 +348,24 @@ func NewChain(
 		CurrentHeight: c.lastBlock.Header.Number, //support.Height() - 1, //0,
 		StateCompare:  func(a bdls.State, b bdls.State) int { return bytes.Compare(a, b) },
 		StateValidate: func(bdls.State) bool { return true },
+		MessageOutCallback: func(message *bdls.Message, signedProto *bdls.SignedProto) {
+			// Send message to all other participants via gRPC
+			for _, consenter := range c.opts.Consenters {
+				nodeID := uint64(consenter.Id)
+				if nodeID != c.bdlsId {
+					c.egress.SendConsensus(nodeID, message)
+				}
+			}
+		},
 	}
-	/*config := new(bdls.Config)
-	config.Epoch = time.Now()
-	config.CurrentHeight = 0 // c.support.Height()
-	config.StateCompare = func(a bdls.State, b bdls.State) int { return bytes.Compare(a, b) }
-	config.StateValidate = func(bdls.State) bool { return true }
-	*/
+
 	Keys := make([]string, 0)
 	Keys = append(Keys,
 		"68082493172628484253808951113461196766221768923883438540199548009461479956986",
 		"44652770827640294682875208048383575561358062645764968117337703282091165609211",
 		"80512969964988849039583604411558290822829809041684390237207179810031917243659",
 		"55978351916851767744151875911101025920456547576858680756045508192261620541580")
-	for k := range Keys { //c.opts.Consenters {
-		//for k := range c.opts.Consenters {
+	for k, consenter := range c.opts.Consenters {
 		i := new(big.Int)
 		_, err := fmt.Sscan(Keys[k], i)
 		if err != nil {
@@ -361,7 +376,7 @@ func NewChain(
 		priv.D = i
 		priv.PublicKey.X, priv.PublicKey.Y = bdls.S256Curve.ScalarBaseMult(priv.D.Bytes())
 		// myself
-		if int(c.bdlsId) == k+1 {
+		if c.bdlsId == uint64(consenter.Id) {
 			config.PrivateKey = priv
 		}
 
@@ -369,13 +384,14 @@ func NewChain(
 		config.Participants = append(config.Participants, bdls.DefaultPubKeyToIdentity(&priv.PublicKey))
 	}
 
-	c.config = config
-
-	nodes, err := c.remotePeers()
+	consensus, err := bdls.NewConsensus(config)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		logger.Panicf("cannot create BDLS NewConsensus: %v", err)
 	}
-	c.Comm.Configure(c.support.ChannelID(), nodes)
+	consensus.SetLatency(200 * time.Millisecond)
+
+	c.config = config
+	c.consensus = consensus
 
 	logger.Infof("BDLS is now serving chain %s", support.ChannelID())
 
@@ -394,23 +410,23 @@ func (c *Chain) remotePeers() ([]cluster.RemoteNode, error) {
 	defer c.bdlsChainLock.RUnlock()
 
 	var nodes []cluster.RemoteNode
-	for id, consenter := range c.opts.Consenters {
+	for _, consenter := range c.opts.Consenters {
+		nodeID := uint64(consenter.Id)
 		// No need to know yourself
-		if uint64(id) == c.bdlsId {
-			//c.opts.portAddress = fmt.Sprint(consenter.Port)
+		if nodeID == c.bdlsId {
 			continue
 		}
-		serverCertAsDER, err := pemToDER(consenter.ServerTlsCert, uint64(id), "server", c.Logger)
+		serverCertAsDER, err := pemToDER(consenter.ServerTlsCert, nodeID, "server", c.Logger)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
-		clientCertAsDER, err := pemToDER(consenter.ClientTlsCert, uint64(id), "client", c.Logger)
+		clientCertAsDER, err := pemToDER(consenter.ClientTlsCert, nodeID, "client", c.Logger)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
 		nodes = append(nodes, cluster.RemoteNode{
 			NodeAddress: cluster.NodeAddress{
-				ID:       uint64(id),
+				ID:       nodeID,
 				Endpoint: fmt.Sprintf("%s:%d", consenter.Host, consenter.Port),
 			},
 			NodeCerts: cluster.NodeCerts{
@@ -418,7 +434,6 @@ func (c *Chain) remotePeers() ([]cluster.RemoteNode, error) {
 				ClientTLSCert: clientCertAsDER,
 			},
 		})
-		//c.Logger.Infof("BDLS Node ID from the remotePeers(): %s ------------", nodes[0].ID)
 	}
 
 	return nodes, nil
@@ -437,10 +452,10 @@ func (c *Chain) HandleMessage(sender uint64, m *bdls.Message /**smartbftprotos.M
 // HandleRequest handles the request from the sender
 func (c *Chain) HandleRequest(sender uint64, req []byte) {
 	c.Logger.Debugf("HandleRequest from %d", sender)
-	if _, err := c.verifier.VerifyRequest(req); err != nil {
-		c.Logger.Warnf("Got bad request from %d: %v", sender, err)
-		return
-	}
+	//if _, err := c.verifier.VerifyRequest(req); err != nil {
+	//	c.Logger.Warnf("Got bad request from %d: %v", sender, err)
+	//	return
+	//}
 	c.consensus.SubmitRequest(req, time.Now())
 }
 
@@ -603,104 +618,17 @@ func (c *Chain) isRunning() error {
 func (c *Chain) Start() {
 	c.Logger.Infof("Starting BDLS node")
 
+	nodes, err := c.remotePeers()
+	if err != nil {
+		c.Logger.Panicf("Failed to get remote peers: %v", err)
+	}
+	c.Comm.Configure(c.support.ChannelID(), nodes)
+
 	close(c.startC)
 	close(c.errorC)
 
-	go c.startConsensus(c.config)
 	go c.run()
-
-}
-
-// consensus for one round with full procedure
-func (c *Chain) startConsensus(config *bdls.Config) error {
-
-	// var propC chan<- *common.Block
-
-	// create consensus
-	consensus, err := bdls.NewConsensus(config)
-	if err != nil {
-		c.Logger.Error("cannot create BDLS NewConsensus", err)
-	}
-	consensus.SetLatency(200 * time.Millisecond)
-	// load endpoints
-	peers := []string{"localhost:4680", "localhost:4681", "localhost:4682", "localhost:4683"}
-
-	// start listener
-	tcpaddr, err := net.ResolveTCPAddr("tcp", fmt.Sprint(":", 4679+int(c.bdlsId)))
-	if err != nil {
-		c.Logger.Error("cannot create ResolveTCPAddr", err)
-	}
-
-	l, err := net.ListenTCP("tcp", tcpaddr)
-	if err != nil {
-		c.Logger.Error("cannot create ListenTCP", err)
-	}
-	defer l.Close()
-	c.Logger.Info("listening on:", fmt.Sprint(":", 4679+int(c.bdlsId)))
-
-	// initiate tcp agent
-	transportLayer := agent.NewTCPAgent(consensus, config.PrivateKey)
-	if err != nil {
-		c.Logger.Error("cannot create NewTCPAgent", err)
-	}
-
-	// start updater
-	//transportLayer.Update()
-
-	// passive connection from peers
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			c.Logger.Info("peer connected from:", conn.RemoteAddr())
-			// peer endpoint created
-			p := agent.NewTCPPeer(conn, transportLayer)
-			transportLayer.AddPeer(p)
-			// prove my identity to this peer
-			p.InitiatePublicKeyAuthentication()
-		}
-	}()
-
-	// active connections to peers
-	for k := range peers {
-		go func(raddr string) {
-			for {
-				conn, err := net.Dial("tcp", raddr)
-				if err == nil {
-					c.Logger.Info("connected to peer:", conn.RemoteAddr())
-					// peer endpoint created
-					p := agent.NewTCPPeer(conn, transportLayer)
-					transportLayer.AddPeer(p)
-					// prove my identity to this peer
-					p.InitiatePublicKeyAuthentication()
-					return
-				}
-				<-time.After(time.Second)
-			}
-		}(peers[k])
-	}
-
-	c.transportLayer = transportLayer
-
-	//go c.runNode()
-
-	updateTick := time.NewTicker(updatePeriod)
 	go c.TestMultiClients()
-	for {
-		<-updateTick.C
-		c.transportLayer.Update()
-		// Check for confirmed new block
-		height /*round*/, _, state := c.transportLayer.GetLatestState()
-		if height > c.lastBlock.Header.Number {
-			go func() {
-				c.applyC <- apply{state}
-			}()
-		}
-	}
-
-	//return nil
 }
 
 func (c *Chain) apply( /*height uint64, round uint64,*/ state bdls.State) {
@@ -737,61 +665,43 @@ func (c *Chain) run() {
 	}
 	// the consensus updater ticker
 	updateTick := time.NewTicker(updatePeriod)
-	//defer updateTick.Stop()
+	defer updateTick.Stop()
 
 	submitC := c.submitC
-	//var propC chan<- *common.Block
 	ch := make(chan *common.Block, c.opts.MaxInflightBlocks)
 	c.blockInflight = 0
 
-	//var bc *blockCreator
-	//No need to create Var for bc, BFT type Orderer intialaize the blockCreator in each node participent
 	bc := &blockCreator{
 		hash:   protoutil.BlockHeaderHash(c.lastBlock.Header),
 		number: c.lastBlock.Header.Number,
 		logger: c.Logger,
 	}
 	c.Logger.Infof("Start accepting requests at block [%d]", c.lastBlock.Header.Number)
-	//submitC = nil
-	// Leader should call Propose in go routine, because this method may be blocked
-	// if node is leaderless (this can happen when leader steps down in a heavily
-	// loaded network). We need to make sure applyC can still be consumed properly.
+
 	go func(ch chan *common.Block) {
 		for {
-			//	select {
-			/*case*/
 			b := <-ch
 			data := protoutil.MarshalOrPanic(b)
-			c.transportLayer.Propose(data)
+			c.consensus.Propose(data)
 			c.Logger.Debugf("Proposed block [%d] to BDLS consensus", b.Header.Number)
-
-			/*case <-ctx.Done():
-				c.Logger.Debugf("Quit proposing blocks, discarded %d blocks in the queue", len(ch))
-				return
-			}*/
 		}
 	}(ch)
 
 	for {
 		select {
-		/*case <-updateTick.C:
-		c.transportLayer.Update()
-		newHeight, newRound, newState := c.transportLayer.GetLatestState()
-		if newHeight > c.lastBlock.Header.Number {
-			c.Logger.Infof("RRRRRRRRRRR updateTick.C RRRRRRRRRRRRRRRRRR height: %v round: %v  lastBlock: %v", newHeight, newRound, c.lastBlock.Header.Number)
-			//newBlock := protoutil.UnmarshalBlockOrPanic(newState)
-			//	c.writeBlock(newBlock, 0)
-			go func() {
-				c.applyC <- apply{state: newState}
-			}()
-		}*/
+		case <-updateTick.C:
+			c.consensus.Update(time.Now())
+			height, _, state := c.consensus.CurrentState()
+			if height > c.lastBlock.Header.Number {
+				go func() {
+					c.applyC <- apply{state: state}
+				}()
+			}
 		case s := <-submitC:
 			if s == nil {
 				// polled by `WaitReady`
 				continue
 			}
-			// Direct Ordered for the Payload
-			//batches, pending := c.support.BlockCutter().Ordered(s.req.Payload)
 
 			batches, pending, err := c.ordered(s.req)
 			if err != nil {
@@ -811,10 +721,6 @@ func (c *Chain) run() {
 
 			c.propose(ch, bc, batches...)
 
-			/*if len(batches) == 1 {
-				submitC = nil
-			}*/
-
 			if c.configInflight {
 				c.Logger.Info("Received config transaction, pause accepting transaction till it is committed")
 				submitC = nil
@@ -824,7 +730,6 @@ func (c *Chain) run() {
 				submitC = nil
 			}
 		case app := <-c.applyC:
-			c.Logger.Infof("applyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyc")
 			c.apply(app.state)
 			if c.configInflight {
 				c.Logger.Info("Config block or ConfChange in flight, pause accepting transaction")
@@ -835,7 +740,6 @@ func (c *Chain) run() {
 
 		case <-timer.C():
 			ticking = false
-			c.Logger.Infof("pppppppppppppppppppppppppppppppp <-timer.C( pppppppppppppppppppppppppppppppppppppppp")
 			batch := c.support.BlockCutter().Cut()
 			if len(batch) == 0 {
 				c.Logger.Warningf("Batch timer expired with no pending requests, this might indicate a bug")
@@ -843,23 +747,19 @@ func (c *Chain) run() {
 			}
 
 			c.Logger.Debugf("Batch timer expired, creating block")
-			c.propose(ch, bc, batch) // we are certain this is normal block, no need to block
+			c.propose(ch, bc, batch)
 
 		case <-c.doneC:
 			stopTimer()
-			//cancelProp()
-			updateTick.Stop()
 			select {
 			case <-c.errorC: // avoid closing closed channel
 			default:
 				close(c.errorC)
 			}
 			c.Logger.Infof("Stop serving requests")
-			//c.periodicChecker.Stop()
 			return
 		}
 	}
-
 }
 
 // StatusReport returns the ConsensusRelation & Status
@@ -904,37 +804,6 @@ func BdlsPeers(consenters []*common.Consenter) []Peer {
 		peers = append(peers, Peer{ID: uint64(i)})
 	}
 	return peers
-}
-
-func (c *Chain) runNode() {
-	bdlsPeers := BdlsPeers(c.opts.Consenters)
-	c.Logger.Debugf("*Starting bdls node: #peers: %v", len(bdlsPeers))
-
-	// BDLS consensus updater ticker
-	updateTick := time.NewTicker(updatePeriod)
-	for {
-		select {
-		// required tick for BDLS
-		case <-updateTick.C:
-			c.transportLayer.Update()
-
-		case rd := <-c.Ready():
-			state := rd.state
-			c.applyC <- apply{state}
-			c.readyC = nil
-		}
-	}
-}
-
-func (c *Chain) Ready() <-chan Ready {
-
-	height, _, state := c.transportLayer.GetLatestState()
-	//readyC := make(chan Ready)
-	if height > c.lastBlock.Header.Number {
-		c.readyC <- Ready{state}
-		return c.readyC
-	}
-	return nil
 }
 
 type Ready struct {

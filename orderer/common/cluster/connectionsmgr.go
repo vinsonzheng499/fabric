@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package cluster
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/hyperledger/fabric/internal/pkg/comm"
@@ -40,6 +41,7 @@ type ConnectionsMgr struct {
 }
 
 func (c *ConnectionsMgr) Connect(endpoint string, serverRootCACert [][]byte) (*grpc.ClientConn, error) {
+	fmt.Printf("WE ARE HERE ********** Endpoint %s\n", endpoint)
 	if serverRootCACert == nil {
 		return nil, errors.New("server root CA cert is nil")
 	}

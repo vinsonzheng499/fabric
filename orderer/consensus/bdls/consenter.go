@@ -72,11 +72,7 @@ type Consenter struct {
 
 // HandleChain returns a new Chain instance or an error upon failure
 func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *common.Metadata) (consensus.Chain, error) {
-	//configOptions := &smartbft.Options{}
 	consenters := support.SharedConfig().Consenters()
-	/*if err := proto.Unmarshal(support.SharedConfig().ConsensusMetadata(), configOptions); err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal consensus metadata")
-	}*/
 
 	selfID, err := c.detectSelfID(consenters)
 	if err != nil {
@@ -89,19 +85,6 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 		c.Logger.Panicf("Failed initializing block puller")
 	}
 
-	//config, err := configFromMetadataOptions((uint64)(selfID), configOptions)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed parsing smartbft configuration")
-	}
-	//c.Logger.Debugf("SmartBFT-Go config: %+v", config)
-	/*
-		configValidator := &ConfigBlockValidator{
-			ValidatingChannel:    support.ChannelID(),
-			Filters:              c.Registrar,
-			ConfigUpdateProposer: c.Registrar,
-			Logger:               c.Logger,
-		}
-	*/
 	opts := Options{
 		Consenters:        consenters,
 		MaxInflightBlocks: 1,
@@ -109,10 +92,7 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 	}
 
 	chain, err := NewChain(
-		//configValidator,
 		(uint64)(selfID),
-		//config,
-
 		path.Join(c.WALBaseDir, support.ChannelID()),
 		puller,
 		c.Comm,
@@ -126,7 +106,6 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 	if err != nil {
 		return nil, errors.Wrap(err, "failed creating a new Chain")
 	}
-	chain.opts = opts
 
 	// refresh cluster service with updated consenters
 	c.ClusterService.ConfigureNodeCerts(chain.Channel, consenters)
